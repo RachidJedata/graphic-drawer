@@ -1,11 +1,10 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
+import { Parameters } from './utils';
 
 interface SignalData {
-  parameters: {
-    [key: string]: number;
-  };
+  parameters: Parameters;
   time: number[];
   signal: number[];
   frequency?: number[];
@@ -13,7 +12,7 @@ interface SignalData {
 
 interface SignalVisualizationProps {
   endpoint: string;
-  params: Record<string, string | number>;
+  params: Parameters;
   title?: string;
 }
 
