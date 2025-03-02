@@ -1,6 +1,6 @@
-from fastapi import FastAPI, Query,HTTPException
-from fastapi.middleware.cors import CORSMiddleware  # <-- Add this import
-import numpy as np
+from fastapi import FastAPI, Query,HTTPException # type: ignore
+from fastapi.middleware.cors import CORSMiddleware  # type: ignore # <-- Add this import
+import numpy as np # type: ignore
 import math
 
 
@@ -16,41 +16,91 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --------------------------
+# Reusable Helper Functions
+# --------------------------
+def generate_time_array(duration: float, Te: float) -> np.ndarray:
+    """Generate centered time array [-duration/2, duration/2) with step Te"""
+    return np.arange(-duration/2, duration/2, Te)
+
+def generate_frequency_axis(t: np.ndarray, Te: float) -> np.ndarray:
+    """Generate centered frequency axis for FFT"""
+    n = len(t)
+    return np.fft.fftshift(np.fft.fftfreq(n, d=Te))
+
+def generate_comb_signal(duration: float, period: float, Te: float) -> dict:
+    """
+    Generates a Dirac comb signal with impulses at specified intervals.
+    
+    Parameters:
+        duration (float): Total time window (centered around 0)
+        period (float): Spacing between impulses (must be > 0)
+        Te (float): Time resolution/sampling interval (must be > 0)
+    
+    Returns:
+        dict: {"time": list_of_timestamps, "signal": list_of_0s_and_1s}
+    """
+    # Generate time axis from -duration/2 to duration/2 (centered)
+    time_array = np.arange(-duration/2, duration/2, Te)
+    time = time_array.tolist()
+    
+    # Initialize signal with zeros (NumPy array for performance)
+    signal = np.zeros_like(time_array, dtype=int)
+    
+    if len(time_array) == 0:  # Handle empty time array edge case
+        return {"time": time, "signal": signal.tolist()}
+    
+    # Calculate first/last impulse indices within the time range
+    t_start, t_end = -duration/2, duration/2 - 1e-9  # Boundary adjustment
+    n_min = math.ceil(t_start / period)
+    n_max = math.floor(t_end / period)
+    
+    # Place impulses at calculated positions
+    for n in range(n_min, n_max + 1):
+        t_impulse = n * period
+        index = int(np.round((t_impulse - time_array[0]) / Te))
+        if 0 <= index < len(signal):
+            signal[index] = 1
+    
+    return {"time": time, "signal": signal.tolist()}
+             
+def validate_positive(**params):
+    """Validate parameters are positive"""
+    for name, value in params.items():
+        if value <= 0:
+            raise HTTPException(400, f"{name} must be positive")
+
 def rect(x: np.ndarray) -> np.ndarray:
     """Vectorized rectangular function"""
     return np.where(np.abs(x) <= 0.5, 1, 0).astype(int)
 
+
+# --------------------------
+# Signal Generation Endpoints
+# --------------------------
+
 @app.get("/rect")
-async def get_rect(x: float):
+async def get_rect(x: float,duration:float=10e-3):
     try:
         if x == 0:
             raise ValueError("x cannot be zero")
             
         # Signal parameters
-        fs = 250e3  # Sampling frequency (250 kHz)
-        T = 1e-3    # Time duration (1 ms)
+        fs, T_pulse = 250e3, 1e-3
+       
         
-        # Time array (-5ms to 5ms with dt=4μs)
-        t = np.arange(-5e-3, 5e-3, 1/fs)
-        
-        # Frequency array (for potential FFT usage)
-        n = len(t)
-        freq = np.fft.fftshift(np.fft.fftfreq(n, d=1/fs))
-        
-        # Generate the rectangular waveform
-        scaled_time = t / (x * T)
-        y = rect(scaled_time).tolist()
+        # Time array 
+        t = generate_time_array(duration, 1/fs)        
+        scaled_time = t / (x * T_pulse)                
 
         return {
+            "time": t.tolist(),            
+            "signal": rect(scaled_time).tolist(),
             "parameters": {
-                "input_x": x,
+                "largeur": x,
                 "sampling_frequency": fs,
-                "duration": T,
-                "num_samples": len(y)
-            },
-            "time": t.tolist(),
-            "frequency": freq.tolist(),
-            "signal": y
+                "pulse_width": T_pulse
+            }
         }
         
     except ValueError as e:
@@ -58,40 +108,6 @@ async def get_rect(x: float):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
     
-def generate_sinusoidal(period: float, amplitude: float = 1.0, phase: float = 0.0,duration: float = 10e-3) -> dict:
-    """Generate sinusoidal signal with specified parameters"""
-    if period <= 0:
-        raise ValueError("Period must be positive")
-        
-    fs = 250e3  # Sampling frequency (250 kHz)    
-    
-    # Time array from -5ms to 5ms
-    t = np.arange(-duration/2, duration/2, 1/fs)   
-    
-    # Frequency calculation
-    frequency = 1 / period
-    
-    # Generate signal
-    signal = amplitude * np.sin(2 * np.pi * frequency * t + phase)
-    
-    # Frequency domain
-    n = len(t)
-    freq = np.fft.fftshift(np.fft.fftfreq(n, d=1/fs))
-    
-    return {
-        "time": t.tolist(),
-        "frequency": freq.tolist(),
-        "signal": signal.tolist(),
-        "parameters": {
-            "period": period,
-            "frequency": frequency,
-            "amplitude": amplitude,
-            "phase": phase,
-            "sampling_rate": fs,
-            "duration": duration,
-            "num_samples": n
-        }
-    }
 
 @app.get("/sinus")
 async def get_sinus(
@@ -100,70 +116,61 @@ async def get_sinus(
     phase: float = 0.0,
     duration:float = 10e-3
 ):
-    try:
-        data = generate_sinusoidal(period, amplitude, phase,duration)
-        return data
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Signal generation failed: {str(e)}")
+    Te=1/250e3
+    validate_positive(period=period, duration=duration, Te=Te)
+    t = generate_time_array(duration, Te)
+    freq = 1/period
+    signal = amplitude * np.sin(2 * np.pi * freq * t + phase)
+    return {
+        "time": t.tolist(),
+        "signal": signal.tolist(),
+        "parameters": {
+            "frequency": freq,
+            "amplitude": amplitude,
+            "phase": phase,
+            "duration": duration,
+            "sampling_interval": Te
+        }
+    }
+
     
 @app.get("/impulse")
 async def get_impulse(
     Te: float = 0.001,
     duration: float = 1.0
 ):
-    # Create a time array centered around 0
-    time = np.arange(-duration/2, duration/2, Te).tolist()
+    validate_positive(Te=Te, duration=duration)
+    t = generate_time_array(duration, Te)
     
-    # Create an impulse signal: 1 at t=0 (middle index), 0 elsewhere
-    signal = [0] * len(time)
-    if signal:
-        middle_index = len(time) // 2  # Find the middle index
-        signal[middle_index] = 1  # Set the impulse at the center
-
-    parameters = {"Te": Te, "duration": duration}
-
+    signal = np.zeros(len(t), dtype=int)
+    if len(signal) > 0:
+        signal[len(signal)//2] = 1
+    
     return {
-        "time": time,
-        "signal": signal,
-        "parameters": parameters
+        "time": t.tolist(),
+        "signal": signal.tolist(),
+        "parameters": {"Te": Te, "duration": duration}
     }
 
 @app.get("/dirac_comb")
 async def get_dirac_comb(
     Te: float = Query(0.001, gt=0, description="Sampling interval"),
     duration: float = Query(1.0, gt=0, description="Total time duration"),
-    period: float = Query(0.1, gt=0, description="Spacing between impulses")
+    t_impulse: float = Query(0.1, gt=0, description="Spacing between impulses")
 ):
-    # Generate time array centered around 0
-    time_array = np.arange(-duration/2, duration/2, Te)
-    time = time_array.tolist()
-    
-    # Initialize signal with zeros
-    signal = [0] * len(time)
-    
-    # Calculate impulse positions
-    n_min = math.ceil((-duration/2) / period)
-    n_max = math.floor((duration/2 - 1e-9) / period)  # Avoid boundary inclusion
-    t_impulses = [n * period for n in range(n_min, n_max + 1)]
-    
-    # Set impulses at calculated positions
-    for t in t_impulses:
-        index = int(np.round((t + duration/2) / Te))
-        if 0 <= index < len(signal):
-            signal[index] = 1
+        
+    signalTime = generate_comb_signal(duration=duration,period=t_impulse,Te=Te)
 
     parameters = {
         "Te": Te,
         "duration": duration,
-        "period": period,
-        "impulse_count": len(t_impulses)
+        "t_impulse": t_impulse,
+        "impulse_count": len(signalTime["signal"])
     }
 
     return {
-        "time": time,
-        "signal": signal,
+        "time": signalTime["time"],
+        "signal": signalTime["signal"],
         "parameters": parameters
     }
 
@@ -180,41 +187,38 @@ async def get_sample_sinus(
     """
     Generate a sampled sinusoidal signal using Dirac comb sampling
     """
-    if any(param <= 0 for param in [sinus_period, Te, impulse_period, duration]):
-        raise HTTPException(status_code=400, detail="All parameters must be positive")
+    # Validate inputs
+    validate_positive(
+        sinus_period=sinus_period,
+        Te=Te,
+        impulse_period=impulse_period,
+        duration=duration
+    )
 
+      # Generate comb signal with corrected parameter name
+    comb_data = generate_comb_signal(
+        duration=duration,
+        period=impulse_period,  # Key fix: using 'period' parameter
+        Te=Te
+    )    
     # Create centered time array
-    t = np.arange(-duration/2, duration/2, Te)
-    
+    t = comb_data["time"]
+    comb_signal= comb_data["signal"]
     # Generate sinusoid
     frequency = 1 / sinus_period
-    sinus_signal = amplitude * np.sin(2 * np.pi * frequency * t + phase)
-    
-    # Generate Dirac comb (peigne de Dirac)
-    comb_signal = np.zeros_like(t)
-    n_min = math.ceil((-duration/2) / impulse_period)
-    n_max = math.floor((duration/2 - 1e-9) / impulse_period)
-    
-    # Find exact impulse positions
-    for n in range(n_min, n_max + 1):
-        t_imp = n * impulse_period
-        # Direct index calculation for perfect alignment
-        index = int(round((t_imp - t[0]) / Te))
-        if 0 <= index < len(comb_signal):
-            comb_signal[index] = 1
-    
-    # Sample the sinusoid by multiplying with the comb
-    sampled_signal = sinus_signal * comb_signal
+    sinus_signal = amplitude * np.sin(2 * np.pi * frequency * np.array(t) + phase)
+       
+    # Explicit elementwise multiplication using list comprehension
+    sampled_signal = [c * s for c, s in zip(comb_signal, sinus_signal.tolist())]
 
     parameters = {
         "sinus_frequency": frequency,
         "sampling_frequency": 1/impulse_period,
-        "nyquist_frequency": 1/(2*impulse_period),
-        "num_impulses": comb_signal.sum()
+        "nyquist_frequency": 1/(2*impulse_period),        
     }
 
     return {
-        "time": t.tolist(),        
-        "signal": sampled_signal.tolist(),        
+        "time": t,        
+        "signal": sampled_signal,   
         "parameters": parameters
     }
