@@ -28,6 +28,9 @@ def generate_frequency_axis(t: np.ndarray, Te: float) -> np.ndarray:
     n = len(t)
     return np.fft.fftshift(np.fft.fftfreq(n, d=Te))
 
+def generate_sinus(t,amplitude:float,freq:float,phase:float) -> np.ndarray:
+    return amplitude * np.sin(2 * np.pi * freq * t + phase)
+
 def generate_comb_signal(duration: float, period: float, Te: float) -> dict:
     """
     Generates a Dirac comb signal with impulses at specified intervals.
@@ -73,6 +76,41 @@ def validate_positive(**params):
 def rect(x: np.ndarray) -> np.ndarray:
     """Vectorized rectangular function"""
     return np.where(np.abs(x) <= 0.5, 1, 0).astype(int)
+
+def apply_fading(input_samples, fading_model, max_delay_spread_in_samples):
+    """
+    Apply fading to the input_samples.
+    
+    fading_model:
+        0  -> No fading.
+        1  -> Uniform power profile.
+        11 -> Uniform profile with constant gain (for testing).
+        2  -> Exponential power profile.
+        22 -> Exponential profile with constant gain (for testing).
+    """
+    num_paths = max_delay_spread_in_samples
+
+    if fading_model == 0:
+        return input_samples, 1
+
+    elif fading_model in [1, 11]:
+        variance = np.ones(num_paths) * (1.0 / num_paths)
+
+    elif fading_model in [2, 22]:
+        variance = np.zeros(num_paths)
+        variance[0] = 1.0
+        indices = np.arange(2, num_paths + 1)  # MATLAB indices 2:num_paths → Python indices 1:num_paths
+        variance[1:] = variance[0] * np.exp(-indices / num_paths)
+
+    variance = variance / np.sum(variance)
+
+    if fading_model in [11, 22]:
+        gain = np.sqrt(variance)
+    else:
+        gain = (np.random.randn(num_paths) + 1j * np.random.randn(num_paths)) * np.sqrt(variance / 2)
+
+    faded_samples = np.convolve(input_samples, gain)
+    return faded_samples, gain
 
 
 # --------------------------
@@ -120,7 +158,7 @@ async def get_sinus(
     validate_positive(period=period, duration=duration, Te=Te)
     t = generate_time_array(duration, Te)
     freq = 1/period
-    signal = amplitude * np.sin(2 * np.pi * freq * t + phase)
+    signal = generate_sinus(t=t,amplitude=amplitude,freq=freq,phase=phase)
     return {
         "time": t.tolist(),
         "signal": signal.tolist(),
@@ -198,15 +236,15 @@ async def get_sample_sinus(
       # Generate comb signal with corrected parameter name
     comb_data = generate_comb_signal(
         duration=duration,
-        period=impulse_period,  # Key fix: using 'period' parameter
+        period=impulse_period,  
         Te=Te
     )    
     # Create centered time array
     t = comb_data["time"]
     comb_signal= comb_data["signal"]
     # Generate sinusoid
-    frequency = 1 / sinus_period
-    sinus_signal = amplitude * np.sin(2 * np.pi * frequency * np.array(t) + phase)
+    frequency = 1 / sinus_period    
+    sinus_signal = generate_sinus(t=np.array(t),amplitude=amplitude,freq=frequency,phase=phase)
        
     # Explicit elementwise multiplication using list comprehension
     sampled_signal = [c * s for c, s in zip(comb_signal, sinus_signal.tolist())]
@@ -220,5 +258,50 @@ async def get_sample_sinus(
     return {
         "time": t,        
         "signal": sampled_signal,   
+        "parameters": parameters
+    }
+
+@app.get("/fading")
+def fading_endpoint(
+    duration: float = 1.0,
+    Te: float = 0.001,
+    amplitude: float = 1.0,
+    freq: float = 5.0,
+    phase: float = 0.0,
+    fading_model: int = 2,
+    max_delay_spread_in_samples: int = 500
+):
+    """
+    Returns a JSON with:
+      - time: the centered time array.
+      - signal: the sampled (faded) signal.
+      - parameters: the input parameters used.
+    """
+    # Generate time array and sinusoidal signal.
+    t = generate_time_array(duration, Te)
+    sinus_signal = generate_sinus(t, amplitude, freq, phase)
+    
+    # Apply fading (multipath) to the sinusoidal signal.
+    sampled_signal, gain = apply_fading(sinus_signal, fading_model, max_delay_spread_in_samples)
+    
+    # Convert NumPy arrays to Python lists.
+    t_list = t.tolist()
+    # In case the sampled signal is complex, we take the real part.
+    sampled_signal_list = [float(x.real) for x in sampled_signal.tolist()]
+        
+    # Bundle parameters into a dictionary.
+    parameters = {
+        "duration": duration,
+        "Te": Te,
+        "amplitude": amplitude,
+        "freq": freq,
+        "phase": phase,
+        "fading_model": fading_model,
+        "max_delay_spread_in_samples": max_delay_spread_in_samples        
+    }
+    
+    return {
+        "time": t_list,
+        "signal": sampled_signal_list,
         "parameters": parameters
     }
