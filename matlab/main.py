@@ -77,18 +77,18 @@ def rect(x: np.ndarray) -> np.ndarray:
     """Vectorized rectangular function"""
     return np.where(np.abs(x) <= 0.5, 1, 0).astype(int)
 
-def apply_fading(input_samples, fading_model, max_delay_spread_in_samples):
+def apply_fading(input_samples, fading_model, num_paths):
     """
     Apply fading to the input_samples.
     
     fading_model:
         0  -> No fading.
-        1  -> Uniform power profile.
+        1  -> Uniform profile.
         11 -> Uniform profile with constant gain (for testing).
-        2  -> Exponential power profile.
+        2  -> Exponential profile.
         22 -> Exponential profile with constant gain (for testing).
     """
-    num_paths = max_delay_spread_in_samples
+    # num_paths = num_paths
 
     if fading_model == 0:
         return input_samples, 1
@@ -108,10 +108,12 @@ def apply_fading(input_samples, fading_model, max_delay_spread_in_samples):
         gain = np.sqrt(variance)
     else:
         gain = (np.random.randn(num_paths) + 1j * np.random.randn(num_paths)) * np.sqrt(variance / 2)
+        #mean=0 , variance=1
+        #np.sqrt(variance / 2) to ensure that is a scaling factor that ensures the resulting complex numbers have the desired variance
+        #Var(Z)=Var(X)+Var(Y) for that we divide by 2
 
     faded_samples = np.convolve(input_samples, gain)
     return faded_samples, gain
-
 
 # --------------------------
 # Signal Generation Endpoints
@@ -269,7 +271,7 @@ def fading_endpoint(
     freq: float = 5.0,
     phase: float = 0.0,
     fading_model: int = 2,
-    max_delay_spread_in_samples: int = 500
+    num_paths: int = 500
 ):
     """
     Returns a JSON with:
@@ -282,13 +284,13 @@ def fading_endpoint(
     sinus_signal = generate_sinus(t, amplitude, freq, phase)
     
     # Apply fading (multipath) to the sinusoidal signal.
-    sampled_signal, gain = apply_fading(sinus_signal, fading_model, max_delay_spread_in_samples)
+    sampled_signal, gain = apply_fading(sinus_signal, fading_model, num_paths)    
     
     # Convert NumPy arrays to Python lists.
     t_list = t.tolist()
     # In case the sampled signal is complex, we take the real part.
     sampled_signal_list = [float(x.real) for x in sampled_signal.tolist()]
-        
+    
     # Bundle parameters into a dictionary.
     parameters = {
         "duration": duration,
@@ -297,7 +299,7 @@ def fading_endpoint(
         "freq": freq,
         "phase": phase,
         "fading_model": fading_model,
-        "max_delay_spread_in_samples": max_delay_spread_in_samples        
+        "num_paths": num_paths        
     }
     
     return {
